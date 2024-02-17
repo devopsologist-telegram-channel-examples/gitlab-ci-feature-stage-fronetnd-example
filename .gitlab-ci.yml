@@ -1,0 +1,92 @@
+stages:
+    - deploy-feature-stage
+    - downstream-deploy-feature-stage
+
+.deploy_feature_stage: &deploy_feature_stage
+    - sed -i "s/#BACKEND_FEATURE_ENV_HOST#/${BACKEND_FEATURE_ENV_HOST}/" .env.stage
+    - docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) --pull -t ${CI_REGISTRY_IMAGE}:${FEATURE_ENV_HOST} .
+    - docker --config config-${CI_JOB_ID} push ${CI_REGISTRY_IMAGE}:${FEATURE_ENV_HOST}
+    - ssh -p 12345 gitlab-deploy@stage "docker --config config-${CI_JOB_ID} login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}"
+    - ssh -p 12345 gitlab-deploy@stage "docker --config config-${CI_JOB_ID} pull ${CI_REGISTRY_IMAGE}:${FEATURE_ENV_HOST}"
+    - ssh -p 12345 gitlab-deploy@stage "docker stop ${CI_PROJECT_NAME}-${FEATURE_ENV_HOST} || true"
+    - ssh -p 12345 gitlab-deploy@stage "docker rm ${CI_PROJECT_NAME}-${FEATURE_ENV_HOST} || true"
+    - |
+        ssh -p 12345 gitlab-deploy@stage "docker run --name ${CI_PROJECT_NAME}-${FEATURE_ENV_HOST} \
+                                                         --label traefik.enable=true \
+                                                         --label traefik.docker.network=traefik-public \
+                                                         --label traefik.http.routers.frontend-${FEATURE_ENV_HOST}.entryPoints=https \
+                                                         --label traefik.http.routers.frontend-${FEATURE_ENV_HOST}.rule=Host\\(\\\`frontend-${FEATURE_ENV_HOST}.stage.example.com\\\`\\) \
+                                                         --label traefik.http.routers.frontend-${FEATURE_ENV_HOST}.tls=true \
+                                                         --label traefik.http.services.frontend-${FEATURE_ENV_HOST}.loadBalancer.server.port=8080 \
+                                                         --network=traefik-public \
+                                                         -d ${CI_REGISTRY_IMAGE}:${FEATURE_ENV_HOST}"
+    - ssh -p 12345 gitlab-deploy@stage "docker --config config-${CI_JOB_ID} logout ${CI_REGISTRY}"
+    - ssh -p 12345 gitlab-deploy@stage "rm -rf config-${CI_JOB_ID}"
+
+.stop_feature_stage: &stop_feature_stage
+    - ssh -p 12345 gitlab-deploy@stage "docker stop ${CI_PROJECT_NAME}-${FEATURE_ENV_HOST} || true"
+
+default:
+    before_script:
+        - docker --config config-${CI_JOB_ID} login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+
+    after_script:
+        - docker --config config-${CI_JOB_ID} logout ${CI_REGISTRY}
+
+deploy-feature-stage:
+    stage: deploy-feature-stage
+    before_script:
+        - !reference [ default, before_script ]
+        - if [[ ${CI_MERGE_REQUEST_MILESTONE} == "" ]]; then FEATURE_ENV_HOST=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}; else FEATURE_ENV_HOST=${CI_MERGE_REQUEST_MILESTONE}; fi
+        - if [[ ${CI_MERGE_REQUEST_MILESTONE} == "" ]]; then BACKEND_FEATURE_ENV_HOST=master; else BACKEND_FEATURE_ENV_HOST=${CI_MERGE_REQUEST_MILESTONE}; fi
+        - FEATURE_ENV_HOST=`echo ${FEATURE_ENV_HOST} | tr '[:upper:]' '[:lower:]'`
+        - BACKEND_FEATURE_ENV_HOST=`echo ${BACKEND_FEATURE_ENV_HOST} | tr '[:upper:]' '[:lower:]'`
+    script:
+        - *deploy_feature_stage
+    when: manual
+    only:
+        - merge_requests
+    environment:
+        name: feature-stage/$CI_COMMIT_REF_SLUG
+        on_stop: stop-feature-stage
+    tags:
+        - example-frontend
+
+stop-feature-stage:
+    stage: deploy-feature-stage
+    before_script:
+        - if [[ ${CI_MERGE_REQUEST_MILESTONE} == "" ]]; then FEATURE_ENV_HOST=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}; else FEATURE_ENV_HOST=${CI_MERGE_REQUEST_MILESTONE}; fi
+        - FEATURE_ENV_HOST=`echo ${FEATURE_ENV_HOST} | tr '[:upper:]' '[:lower:]'`
+    script:
+        - *stop_feature_stage
+    when: manual
+    only:
+        - merge_requests
+    environment:
+        name: feature-stage/$CI_COMMIT_REF_SLUG
+        action: stop
+    tags:
+        - example-frontend
+
+deploy-feature-stage-downstream-pipeline:
+    stage: downstream-deploy-feature-stage
+    rules:
+        - if: $CI_PIPELINE_SOURCE == "pipeline" && $UPSTREAM_ENVIRONMENT_ACTION == "start"
+    script:
+        - FEATURE_ENV_HOST=`echo ${FEATURE_ENV_HOST} | tr '[:upper:]' '[:lower:]'`
+        - BACKEND_FEATURE_ENV_HOST=${FEATURE_ENV_HOST}
+        - *deploy_feature_stage
+    when: on_success
+    tags:
+        - example-frontend
+
+stop-feature-stage-downstream-pipeline:
+    stage: downstream-deploy-feature-stage
+    rules:
+        - if: $CI_PIPELINE_SOURCE == "pipeline" && $UPSTREAM_ENVIRONMENT_ACTION == "stop"
+    script:
+        - FEATURE_ENV_HOST=`echo ${FEATURE_ENV_HOST} | tr '[:upper:]' '[:lower:]'`
+        - *stop_feature_stage
+    when: on_success
+    tags:
+        - example-frontend
