@@ -1,6 +1,7 @@
 stages:
     - deploy-feature-stage
     - downstream-deploy-feature-stage
+    - deploy
 
 .deploy_feature_stage: &deploy_feature_stage
     - sed -i "s/#BACKEND_FEATURE_ENV_HOST#/${BACKEND_FEATURE_ENV_HOST}/" .env.stage
@@ -87,6 +88,16 @@ stop-feature-stage-downstream-pipeline:
     script:
         - FEATURE_ENV_HOST=`echo ${FEATURE_ENV_HOST} | tr '[:upper:]' '[:lower:]'`
         - *stop_feature_stage
+    when: on_success
+    tags:
+        - example-frontend
+
+deploy-prod:
+    stage: deploy
+    rules:
+        -   if: $CI_PIPELINE_SOURCE != "pipeline" && $CI_COMMIT_BRANCH == "master"
+    script:
+        - echo "deploy prod"
     when: on_success
     tags:
         - example-frontend
